@@ -47,8 +47,15 @@ class RoutingSimulation(Node):
             10
         )
         
+        # Publisher for rover position marker
+        self.rover_marker_publisher = self.create_publisher(
+            Marker,
+            '/rover_position',
+            10
+        )
+        
         # Timer to publish at regular intervals
-        self.timer = self.create_timer(0.1, self.publish_bounding_boxes)
+        self.timer = self.create_timer(0.1, self.publish_markers)
         
         # Rover position (x, y, theta)
         self.rover_x = 0.0
@@ -90,6 +97,7 @@ class RoutingSimulation(Node):
         These are stored in self.bounding_boxes list.
         """
         self.rover_theta = math.pi / 6
+        self.rover_x = .5
         
         self.define_obstacle(1.0, 0.5, 3.0, -30)
         
@@ -186,11 +194,100 @@ class RoutingSimulation(Node):
         
         return marker
 
-    def publish_bounding_boxes(self):
+    def create_rover_marker(self):
         """
-        Main publishing function that creates and publishes bounding boxes
-        from the stored bounding_boxes list.
+        Create a bounding box marker for the rover position.
+        Rover is a 0.5m x 0.5m x 0.5m cube.
+        
+        Returns:
+        - Marker object representing the rover
         """
+        marker = Marker()
+        marker.header.frame_id = "laser"
+        marker.header.stamp = self.get_clock().now().to_msg()
+        marker.ns = "rover"
+        marker.id = 0
+        marker.type = Marker.LINE_LIST
+        marker.action = Marker.ADD
+        
+        # Rover position
+        rover_center_x = self.rover_x
+        rover_center_y = self.rover_y
+        rover_center_z = 0.25  # Half of 0.5m height
+        
+        # Define the 8 corners of the rover cube
+        half_size = 0.25  # 0.5m / 2
+        
+        # Corners in local rover frame
+        # Length (x-local) points along rover's heading
+        # Width (y-local) is perpendicular to heading
+        corners_local = [
+            [-half_size, -half_size, -half_size],  # 0: bottom-back-left
+            [half_size, -half_size, -half_size],   # 1: bottom-front-left
+            [half_size, half_size, -half_size],    # 2: bottom-front-right
+            [-half_size, half_size, -half_size],   # 3: bottom-back-right
+            [-half_size, -half_size, half_size],   # 4: top-back-left
+            [half_size, -half_size, half_size],    # 5: top-front-left
+            [half_size, half_size, half_size],     # 6: top-front-right
+            [-half_size, half_size, half_size],    # 7: top-back-right
+        ]
+        
+        # Rotate corners around z-axis by rover heading
+        corners_global = []
+        cos_theta = math.cos(self.rover_theta)
+        sin_theta = math.sin(self.rover_theta)
+        
+        for corner in corners_local:
+            # Rotate in XY plane around z-axis
+            x_rot = corner[0] * cos_theta - corner[1] * sin_theta
+            y_rot = corner[0] * sin_theta + corner[1] * cos_theta
+            
+            # Translate to global position
+            point = Point()
+            point.x = rover_center_x + x_rot
+            point.y = rover_center_y + y_rot
+            point.z = rover_center_z + corner[2]
+            corners_global.append(point)
+        
+        # Create edges for the bounding box (12 edges for a cube)
+        edges = [
+            # Bottom face
+            (0, 1), (1, 2), (2, 3), (3, 0),
+            # Top face
+            (4, 5), (5, 6), (6, 7), (7, 4),
+            # Vertical edges
+            (0, 4), (1, 5), (2, 6), (3, 7)
+        ]
+        
+        # Draw the 12 edges as solid lines
+        marker.points = []
+        for edge in edges:
+            p1 = corners_global[edge[0]]
+            p2 = corners_global[edge[1]]
+            
+            # Add start and end point of this edge
+            marker.points.append(p1)
+            marker.points.append(p2)
+        
+        # Set marker properties - different color for rover (blue)
+        marker.scale.x = 0.02  # Line width
+        marker.color.r = 0.0
+        marker.color.g = 0.0
+        marker.color.b = 1.0
+        marker.color.a = 1.0
+        
+        return marker
+
+    def publish_markers(self):
+        """
+        Main publishing function that creates and publishes both
+        rover position and bounding boxes.
+        """
+        # Publish rover position
+        rover_marker = self.create_rover_marker()
+        self.rover_marker_publisher.publish(rover_marker)
+        
+        # Publish bounding boxes
         marker_array = MarkerArray()
         
         # Create markers for all stored bounding boxes
