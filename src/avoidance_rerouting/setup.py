@@ -13,7 +13,6 @@ setup(
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
         
-        # --- ADD THIS LINE ---
         (os.path.join('share', package_name, 'launch'), glob('launch/*')),
     ],
     install_requires=['setuptools'],
@@ -27,7 +26,9 @@ setup(
         'console_scripts': [
             'mock_lidar_publisher = avoidance_rerouting.mock_lidar_publisher:main',
             'lidar_detection = avoidance_rerouting.lidar_detection:main',
+            'path_planner_node = avoidance_rerouting.path_planner_node:main',
             'rerouting = avoidance_rerouting.rerouting:main',
+            'routing_simulation = avoidance_rerouting.routing_simulation:main'
         ],
     },
 )

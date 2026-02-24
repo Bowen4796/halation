@@ -58,15 +58,30 @@ class RoutingSimulation(Node):
         self.timer = self.create_timer(0.1, self.publish_markers)
         
         # Rover position (x, y, theta)
-        self.rover_x = 0.0
+        self.rover_x = -5.0
         self.rover_y = 0.0
         self.rover_theta = 0.0  # Rover's heading angle (radians)
         
         # List to store all detected bounding boxes
         self.bounding_boxes = []
-        
+        self.blocking_bbox = None
+
         # Create test bounding boxes
         self.create_test_bounding_boxes()
+
+        self.rover_width = 0.6
+        self.rover_length = 0.8
+
+        self.rover_safety_margin = .5 # (width or length)/safety_margin added to bounding box dimensions for collision checking
+
+        # Target point (goal)
+        self.target_x = 10.0
+        self.target_y = 0.0
+        self.target_threshold = 0.25
+
+        # Motion parameters
+        self.forward_step = 0.1
+        self.lookahead_distance = 2.0
         
         self.get_logger().info('Routing Simulation Node Started')
 
@@ -96,12 +111,20 @@ class RoutingSimulation(Node):
         Create initial test bounding boxes for simulation.
         These are stored in self.bounding_boxes list.
         """
+        orig_x = self.rover_x
         self.rover_theta = math.pi / 6
         self.rover_x = .5
         
-        self.define_obstacle(1.0, 0.5, 3.0, -30)
+        self.define_obstacle(1.0, 0.5, 3.0, -45)
         
-        self.define_obstacle(0.8, 0.6, 1.0, 0)
+        self.define_obstacle(.9, 0.6, 1.5, 30)
+
+        self.define_obstacle(.9, 0.6, 4, 30)
+
+        self.rover_x = -3
+        self.define_obstacle(0.5, 1.0, 2.0, -70)
+
+        self.rover_x = orig_x
 
     def create_bounding_box_marker(self, marker_id, bbox):
         """
@@ -216,20 +239,22 @@ class RoutingSimulation(Node):
         rover_center_z = 0.25  # Half of 0.5m height
         
         # Define the 8 corners of the rover cube
-        half_size = 0.25  # 0.5m / 2
+        half_width = self.rover_width / 2.0
+        half_length = self.rover_length / 2.0
+        half_height = 0.25
         
         # Corners in local rover frame
         # Length (x-local) points along rover's heading
         # Width (y-local) is perpendicular to heading
         corners_local = [
-            [-half_size, -half_size, -half_size],  # 0: bottom-back-left
-            [half_size, -half_size, -half_size],   # 1: bottom-front-left
-            [half_size, half_size, -half_size],    # 2: bottom-front-right
-            [-half_size, half_size, -half_size],   # 3: bottom-back-right
-            [-half_size, -half_size, half_size],   # 4: top-back-left
-            [half_size, -half_size, half_size],    # 5: top-front-left
-            [half_size, half_size, half_size],     # 6: top-front-right
-            [-half_size, half_size, half_size],    # 7: top-back-right
+            [-half_length, -half_width, -half_height],
+            [half_length, -half_width, -half_height],
+            [half_length, half_width, -half_height],
+            [-half_length, half_width, -half_height],
+            [-half_length, -half_width, half_height],
+            [half_length, -half_width, half_height],
+            [half_length, half_width, half_height],
+            [-half_length, half_width, half_height],
         ]
         
         # Rotate corners around z-axis by rover heading
@@ -278,11 +303,132 @@ class RoutingSimulation(Node):
         
         return marker
 
+    def move_forward(self, d):
+        """
+        Move rover forward by distance d along its current heading.
+        """
+        self.rover_x += d * math.cos(self.rover_theta)
+        self.rover_y += d * math.sin(self.rover_theta)
+
+    def will_collide_ahead(self):
+        """
+        Stateful forward collision detection with hysteresis.
+        """
+
+        # If we already have a blocking obstacle,
+        # check if it's still in the way with relaxed bounds
+        if self.blocking_bbox is not None:
+            bbox = self.blocking_bbox
+
+            dx = bbox.x - self.rover_x
+            dy = bbox.y - self.rover_y
+
+            forward_dist = dx * math.cos(self.rover_theta) + dy * math.sin(self.rover_theta)
+            lateral_dist = -dx * math.sin(self.rover_theta) + dy * math.cos(self.rover_theta)
+
+            safe_forward = self.lookahead_distance + self.rover_length / self.rover_safety_margin + bbox.length / 2.0
+            safe_lateral = self.rover_width / self.rover_safety_margin + bbox.width / 2.0
+
+            # If still clearly blocking → remain blocked
+            if 0 < forward_dist < safe_forward and abs(lateral_dist) < safe_lateral:
+                return True
+
+            # Otherwise obstacle cleared
+            self.blocking_bbox = None
+
+        # Normal detection
+        for bbox in self.bounding_boxes:
+
+            dx = bbox.x - self.rover_x
+            dy = bbox.y - self.rover_y
+
+            forward_dist = dx * math.cos(self.rover_theta) + dy * math.sin(self.rover_theta)
+            lateral_dist = -dx * math.sin(self.rover_theta) + dy * math.cos(self.rover_theta)
+
+            safe_forward = self.lookahead_distance + self.rover_length / self.rover_safety_margin + bbox.length / 2.0
+            safe_lateral = self.rover_width / self.rover_safety_margin + bbox.width / 2.0
+
+            if 0 < forward_dist < safe_forward:
+                if abs(lateral_dist) < safe_lateral:
+                    self.blocking_bbox = bbox
+                    return True
+
+        return False
+
+    def compute_avoidance_heading(self):
+        """
+        Generate a new heading that avoids closest obstacle
+        while still generally pointing toward target.
+        """
+
+        closest_bbox = None
+        closest_dist = float('inf')
+
+        for bbox in self.bounding_boxes:
+            dx = bbox.x - self.rover_x
+            dy = bbox.y - self.rover_y
+            dist = math.hypot(dx, dy)
+
+            if dist < closest_dist:
+                closest_dist = dist
+                closest_bbox = bbox
+
+        if closest_bbox is None:
+            return self.rover_theta
+        if closest_bbox == self.blocking_bbox:
+            return self.rover_theta
+
+        # Determine which side obstacle is on
+        dx = closest_bbox.x - self.rover_x
+        dy = closest_bbox.y - self.rover_y
+
+        lateral = -dx * math.sin(self.rover_theta) + dy * math.cos(self.rover_theta)
+
+        # Steer away from obstacle
+        turn_angle = math.radians(30)
+
+        if lateral > 0:
+            return self.rover_theta - turn_angle
+        else:
+            return self.rover_theta + turn_angle
+        
+    def update_rover_position(self):
+
+        dx = self.target_x - self.rover_x
+        dy = self.target_y - self.rover_y
+
+        if (dx**2 + dy**2) < self.target_threshold:
+            return
+
+        # If currently blocked → stay in avoidance mode
+        if self.blocking_bbox is not None:
+            if self.will_collide_ahead():
+                self.rover_theta = self.compute_avoidance_heading()
+                self.move_forward(self.forward_step)
+                return
+
+        # Normal target tracking
+        target_theta = math.atan2(dy, dx)
+
+        heading_error = target_theta - self.rover_theta
+        heading_error = math.atan2(math.sin(heading_error), math.cos(heading_error))
+
+        self.rover_theta += 0.1 * heading_error
+
+        if not self.will_collide_ahead():
+            self.move_forward(self.forward_step)
+        else:
+            self.rover_theta = self.compute_avoidance_heading()
+            self.move_forward(self.forward_step)
+        
     def publish_markers(self):
         """
         Main publishing function that creates and publishes both
         rover position and bounding boxes.
         """
+        # Update rover position based on navigation logic
+        self.update_rover_position()
+
         # Publish rover position
         rover_marker = self.create_rover_marker()
         self.rover_marker_publisher.publish(rover_marker)

@@ -16,8 +16,24 @@ class MockLidarPublisher(Node):
         self.angle_increment = math.radians(1.0) # 1 degree resolution
         
         # Animation state
-        self.obstacle_angle = 0.0
+        self.obstacle_angle = -90
         self.direction = 1
+
+    def add_flat_obstacle(self, ranges, center_angle, width_rad, distance):
+        num_points = len(ranges)
+
+        start_angle = center_angle - width_rad / 2
+        end_angle = center_angle + width_rad / 2
+
+        start_idx = int((start_angle - self.angle_min) / self.angle_increment)
+        end_idx = int((end_angle - self.angle_min) / self.angle_increment)
+
+        start_idx = max(0, start_idx)
+        end_idx = min(num_points, end_idx)
+
+        for i in range(start_idx, end_idx):
+            ranges[i] = min(ranges[i], distance)
+
 
     def publish_scan(self):
         scan = LaserScan()
@@ -39,13 +55,13 @@ class MockLidarPublisher(Node):
         
         # 2. Add a Moving Obstacle (Smooth "Blob")
         # We simulate a solid object about 1 meter wide
-        obs_width_rad = math.radians(30) 
+        obs_width_rad = math.radians(120) 
         obs_dist = 1.5 # 1.5 meters away
         
         # Animate obstacle angle
-        self.obstacle_angle += 0.05 * self.direction
-        if self.obstacle_angle > 1.0 or self.obstacle_angle < -1.0:
-            self.direction *= -1
+        # self.obstacle_angle += 0.05 * self.direction
+        # if self.obstacle_angle > 1.0 or self.obstacle_angle < -1.0:
+        #     self.direction *= -1
 
         # Fill in the obstacle points
         start_angle = self.obstacle_angle - (obs_width_rad / 2)
@@ -58,13 +74,38 @@ class MockLidarPublisher(Node):
         start_idx = max(0, start_idx)
         end_idx = min(num_points, end_idx)
 
-        for i in range(start_idx, end_idx):
-            # Give it a slight curve so it looks like a real object, not a flat line
-            # Simple parabolic curve for "roundness"
-            offset = i - start_idx
-            width = end_idx - start_idx
-            curve = math.sin((offset / width) * math.pi) * 0.2
-            ranges[i] = obs_dist - curve # Object is closer than background
+        # for i in range(start_idx, end_idx):
+        #     # Give it a slight curve so it looks like a real object, not a flat line
+        #     # Simple parabolic curve for "roundness"
+        #     offset = i - start_idx
+        #     width = end_idx - start_idx
+        #     curve = math.sin((offset / width) * math.pi) * 0.2
+        #     ranges[i] = obs_dist - curve # Object is closer than background
+
+        self.add_flat_obstacle(
+            ranges,
+            center_angle=math.radians(self.obstacle_angle),
+            width_rad=math.radians(30),
+            distance=1.5
+        )
+
+        self.obstacle_angle += 2
+        if self.obstacle_angle > 180:
+            self.obstacle_angle = -180
+
+        self.add_flat_obstacle(
+            ranges, 
+            center_angle=math.radians(180),
+            width_rad=math.radians(30),
+            distance=1.5
+        )
+
+        self.add_flat_obstacle(
+            ranges, 
+            center_angle=math.radians(45),
+            width_rad=math.radians(30),
+            distance=1
+        )
 
         scan.ranges = ranges.tolist()
         self.publisher_.publish(scan)
