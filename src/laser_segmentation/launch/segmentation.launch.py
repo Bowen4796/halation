@@ -19,6 +19,7 @@ import os
 from ament_index_python import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, EmitEvent, RegisterEventHandler
+from launch.event_handlers import OnProcessExit
 
 import launch.events
 from launch.substitutions import LaunchConfiguration
@@ -58,9 +59,24 @@ def generate_launch_description():
         parameters=[params_file],
         emulate_tty=True,
         output='screen',
+        respawn=True,
+        respawn_delay=2,
         arguments=[
             '--ros-args',
             '--log-level', ['segmentation:=', LaunchConfiguration('log_level')]]
+    )
+
+    # When segmentation_node is respawned (process exits), configure it
+    register_event_handler_for_node_exits = RegisterEventHandler(
+        OnProcessExit(
+            target_action=segmentation_node,
+            on_exit=[
+                EmitEvent(event=ChangeState(
+                    lifecycle_node_matcher=launch.events.matches_action(segmentation_node),
+                    transition_id=lifecycle_msgs.msg.Transition.TRANSITION_CONFIGURE,
+                )),
+            ],
+        )
     )
 
     # When the node reaches the 'inactive' state, make it take the 'activate' transition.
@@ -88,6 +104,7 @@ def generate_launch_description():
     return LaunchDescription([
         declare_params_file_arg,
         declare_log_level_arg,
+        register_event_handler_for_node_exits,
         register_event_handler_for_node_reaches_inactive_state,
         emit_event_to_request_that_node_does_configure_transition,
         segmentation_node

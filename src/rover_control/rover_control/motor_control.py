@@ -1,10 +1,50 @@
-from rclpy.node import Node
+from rclpy.lifecycle import Node as LifecycleNode
+from rclpy.lifecycle import State, TransitionCallbackReturn
 from std_msgs.msg import String
-import adafruit_dacx578
-import board
-import busio
 import json
 import rclpy
+import time
+
+# Try to import real DAC hardware, fall back to mock
+try:
+    import adafruit_dacx578
+    import board
+    import busio
+    HARDWARE_AVAILABLE = True
+except Exception:
+    HARDWARE_AVAILABLE = False
+    
+    # Mock I2C and DAC classes for testing
+    class MockBusIO:
+        def I2C(self, scl, sda):
+            return MockI2C()
+    
+    class MockI2C:
+        pass
+    
+    class MockDAC:
+        def __init__(self, i2c, address):
+            self.channels = [MockChannel() for _ in range(8)]
+    
+    class MockChannel:
+        def __init__(self):
+            self.raw_value = 0
+    
+    class MockAdafruitDAC:
+        def DACx578(self, i2c, address):
+            return MockDAC(i2c, address)
+    
+    # Create mock objects
+    adafruit_dacx578 = MockAdafruitDAC()
+    
+    class MockBoard:
+        SCL = 'SCL'
+        SDA = 'SDA'
+    
+    board = MockBoard()
+    busio = MockBusIO()
+
+i2c = busio.I2C(board.SCL, board.SDA) if HARDWARE_AVAILABLE else None
 
 VOLTAGE_MAX = 4095  # DAC max value for speed
 
@@ -20,28 +60,111 @@ MOTORS = {
     "right_back": {"speed_channel": 6, "direction_channel": 7, "inverted": True},
 }
 
-i2c = busio.I2C(board.SCL, board.SDA)
 
-
-class MotorControl(Node):
+class MotorControl(LifecycleNode):
     def __init__(self):
         super().__init__("motor_control")
-
-        self.dac = adafruit_dacx578.DACx578(i2c, address=I2C_ADDRESS)
-        self.get_logger().info(f"Motor control initialized with I2C address {I2C_ADDRESS}")
-
-        # Subscribe to vector commands (x, y from joystick)
-        self.vector_subscriber = self.create_subscription(
-            String, "/motor_vector", self.handle_vector, 10
-        )
         
-        # Subscribe to emergency stop
-        self.estop_subscriber = self.create_subscription(
-            String, "/motor_estop", self.handle_estop, 10
-        )
+        self.dac = None
+        self.vector_subscriber = None
+        self.estop_subscriber = None
+        self.command_watchdog = None
+        self.last_command_time = None
+        
+        self.get_logger().info('MotorControl lifecycle node initialized')
 
-        # Stop all motors on startup
-        self.stop_all()
+    def on_configure(self, state: State) -> TransitionCallbackReturn:
+        """Configure hardware and subscriptions."""
+        self.get_logger().info('on_configure called')
+        try:
+            if HARDWARE_AVAILABLE:
+                self.dac = adafruit_dacx578.DACx578(i2c, address=I2C_ADDRESS)
+                self.get_logger().info(f"Motor control configured with I2C address {I2C_ADDRESS}")
+            else:
+                self.dac = adafruit_dacx578.DACx578(None, address=I2C_ADDRESS)
+                self.get_logger().warn('Running in MOCK MODE (no real DAC available)')
+            
+            # Create subscriptions
+            self.vector_subscriber = self.create_subscription(
+                String, "/motor_vector", self.handle_vector, 10
+            )
+            
+            self.estop_subscriber = self.create_subscription(
+                String, "/motor_estop", self.handle_estop, 10
+            )
+            
+            return TransitionCallbackReturn.SUCCESS
+        except Exception as e:
+            self.get_logger().error(f'Configure failed: {e}')
+            return TransitionCallbackReturn.FAILURE
+
+    def on_activate(self, state: State) -> TransitionCallbackReturn:
+        """Activate motor control and start watchdog."""
+        self.get_logger().info('on_activate called')
+        try:
+            self.stop_all()
+            self.last_command_time = self.get_clock().now()
+            
+            # Start watchdog timer
+            self.command_watchdog = self.create_timer(2.0, self.watchdog_callback)
+            self.get_logger().info('Motor control activated')
+            return TransitionCallbackReturn.SUCCESS
+        except Exception as e:
+            self.get_logger().error(f'Activate failed: {e}')
+            return TransitionCallbackReturn.FAILURE
+
+    def on_deactivate(self, state: State) -> TransitionCallbackReturn:
+        """Deactivate motor control and stop watchdog."""
+        self.get_logger().info('on_deactivate called')
+        try:
+            # Stop watchdog
+            if self.command_watchdog:
+                self.destroy_timer(self.command_watchdog)
+                self.command_watchdog = None
+            
+            # Safety: stop all motors
+            self.stop_all()
+            self.get_logger().info('Motor control deactivated')
+            return TransitionCallbackReturn.SUCCESS
+        except Exception as e:
+            self.get_logger().error(f'Deactivate failed: {e}')
+            return TransitionCallbackReturn.FAILURE
+
+    def on_cleanup(self, state: State) -> TransitionCallbackReturn:
+        """Clean up subscriptions."""
+        self.get_logger().info('on_cleanup called')
+        try:
+            if self.vector_subscriber:
+                self.destroy_subscription(self.vector_subscriber)
+                self.vector_subscriber = None
+            
+            if self.estop_subscriber:
+                self.destroy_subscription(self.estop_subscriber)
+                self.estop_subscriber = None
+            
+            self.get_logger().info('Motor control cleaned up')
+            return TransitionCallbackReturn.SUCCESS
+        except Exception as e:
+            self.get_logger().error(f'Cleanup failed: {e}')
+            return TransitionCallbackReturn.FAILURE
+
+    def on_shutdown(self, state: State) -> TransitionCallbackReturn:
+        """Shutdown the node."""
+        self.get_logger().info('on_shutdown called')
+        try:
+            self.stop_all()
+            return TransitionCallbackReturn.SUCCESS
+        except Exception as e:
+            self.get_logger().error(f'Shutdown failed: {e}')
+            return TransitionCallbackReturn.FAILURE
+
+    def watchdog_callback(self):
+        """Detect if command stream has stopped."""
+        now = self.get_clock().now()
+        elapsed = (now - self.last_command_time).nanoseconds / 1e9
+        
+        if elapsed > 2.0:
+            self.get_logger().warn(f'Watchdog: No commands for {elapsed:.1f}s')
 
     def set_motor(self, motor_name: str, speed: float):
         """Set a motor's speed and direction.
@@ -102,6 +225,8 @@ class MotorControl(Node):
 
     def handle_vector(self, msg: String):
         """Handle incoming vector commands from joystick."""
+        self.last_command_time = self.get_clock().now()
+        
         try:
             outer_data = json.loads(msg.data)
             # Handle nested JSON from rosbridge

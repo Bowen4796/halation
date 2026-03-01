@@ -30,6 +30,8 @@ setup(
         'console_scripts': [
             'rover_bringup = rover_bringup.initialize:main',
             'memory_monitor = rover_bringup.memory_monitor:main',
+            'health_monitor = rover_bringup.health_monitor_node:main',
+            'recovery_manager = rover_bringup.recovery_manager:main',
         ],
     },
 )
